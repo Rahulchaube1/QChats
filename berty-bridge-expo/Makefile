@@ -1,0 +1,134 @@
+check-program = $(foreach exec,$(1),$(if $(shell PATH="$(PATH)" which $(exec)),,$(error "Missing deps: no '$(exec)' in PATH")))
+rwildcard = $(foreach d,$(wildcard $1*),$(call rwildcard,$d/,$2) $(filter $(subst *,%,$2),$d))
+GO ?= go # this allows to override the go version used
+GO_TAGS ?= -tags "fts5 sqlite sqlite_unlock_notify"
+GOMOBILE_IOS_TARGET ?= ios
+GOMOBILE_ANDROID_TARGET ?= android/arm64,android/amd64
+
+make_dir := $(patsubst %/,%,$(dir $(lastword $(MAKEFILE_LIST))))
+make_dir := $(or $(make_dir),.)
+bridge_src := $(make_dir)/Makefile $(call rwildcard,../go,*.go *.m *.h) ../go.sum
+gomobile_cache="$(make_dir)/.gomobile-cache"
+gomobile_cache_abs := $(abspath $(gomobile_cache))
+IOS_OUTPUT_BERTYPUSH_FRAMEWORK ?= $(make_dir)/plugin/src/NotificationService/Bertypush.xcframework
+IOS_OUTPUT_BERTYBRIDGE_FRAMEWORK ?= $(make_dir)/ios/Frameworks/Bertybridge.xcframework
+ANDROID_OUTPUT_LIBS ?= $(make_dir)/android/libs/gobridge.aar
+ext_ldflags = -ldflags="-checklinkname=0 -X berty.tech/berty/v2/go/pkg/bertyversion.VcsRef=$$VCS_REF -X berty.tech/berty/v2/go/pkg/bertyversion.Version=$$VERSION"
+minimum_ios_ver = 12.0
+minimum_android_ver = 21
+go_modcacherw_flags = GOFLAGS="$(strip $(GOFLAGS) -modcacherw)"
+
+node_modules: package.json
+	$(call check-program, npm)
+	npm install
+	touch $@
+
+# Resolve the version inside the build recipes (run from the repo root) and embed it via ext_ldflags.
+gomobile_version = VERSION="$$($(GO) run -mod=readonly github.com/mdomke/git-semver/v5)" && VCS_REF="$$(git rev-parse --short HEAD)"
+
+#### iOS
+
+.PHONY: ios.gomobile
+ios.gomobile: node_modules $(IOS_OUTPUT_BERTYBRIDGE_FRAMEWORK) $(IOS_OUTPUT_BERTYPUSH_FRAMEWORK)
+
+$(IOS_OUTPUT_BERTYBRIDGE_FRAMEWORK): $(bridge_src)
+	cd .. && $(GO) mod download
+	cd .. && $(GO) install golang.org/x/mobile/cmd/gobind
+	cd .. && $(GO) run golang.org/x/mobile/cmd/gomobile init
+	mkdir -p $(gomobile_cache_abs) ios/Frameworks
+
+# use `nowatchdog` tags, see https://github.com/libp2p/go-libp2p-connmgr/issues/98
+	cd .. && \
+		$(gomobile_version) && \
+		PATH="$(PATH):`go env GOPATH`/bin" \
+		CGO_CPPFLAGS=-DHAVE_GETHOSTUUID=0 \
+		$(go_modcacherw_flags) \
+		$(GO) run golang.org/x/mobile/cmd/gomobile bind \
+			-v $(ext_ldflags) \
+			-o $(abspath $@) \
+			$(GO_TAGS) -tags 'nowatchdog' \
+			-cache $(gomobile_cache_abs)/bertybridge \
+			-target $(GOMOBILE_IOS_TARGET) \
+			-iosversion $(minimum_ios_ver) \
+			./go/framework/bertybridge
+
+	touch $(abspath $@)
+	cd .. && $(GO) mod tidy
+	chmod -R u+wx $(gomobile_cache_abs) 2>/dev/null || true
+
+$(IOS_OUTPUT_BERTYPUSH_FRAMEWORK): $(bridge_src)
+	cd .. && $(GO) mod download
+	cd .. && $(GO) install golang.org/x/mobile/cmd/gobind
+	cd .. && $(GO) run golang.org/x/mobile/cmd/gomobile init
+	mkdir -p $(gomobile_cache_abs) plugin/src/NotificationService
+
+# use `nowatchdog` tags, see https://github.com/libp2p/go-libp2p-connmgr/issues/98
+	cd .. && \
+		$(gomobile_version) && \
+		PATH="$(PATH):`go env GOPATH`/bin" \
+		CGO_CPPFLAGS=-DHAVE_GETHOSTUUID=0 \
+		$(go_modcacherw_flags) \
+		$(GO) run golang.org/x/mobile/cmd/gomobile bind \
+			-o $(abspath $@) \
+			-v $(ext_ldflags) \
+			$(GO_TAGS) -tags 'nowatchdog,noproximitytransport' \
+			-cache $(gomobile_cache_abs)/bertypush \
+			-target $(GOMOBILE_IOS_TARGET) \
+			-iosversion $(minimum_ios_ver) \
+			./go/framework/bertypush
+
+	touch $(abspath $@)
+	cd .. && $(GO) mod tidy
+	chmod -R u+wx $(gomobile_cache_abs) 2>/dev/null || true
+
+#### Android
+
+.PHONY: android.gomobile
+android.gomobile: node_modules $(ANDROID_OUTPUT_LIBS)
+
+$(ANDROID_OUTPUT_LIBS): $(bridge_src)
+	cd .. && $(GO) mod download
+	cd .. && $(GO) run golang.org/x/mobile/cmd/gomobile init
+	mkdir -p $(gomobile_cache_abs) android/libs
+	cd .. && \
+		$(gomobile_version) && \
+		GO111MODULE=on $(go_modcacherw_flags) $(GO) run golang.org/x/mobile/cmd/gomobile bind \
+		-o $(abspath $@) \
+		-v $(ext_ldflags) \
+		$(GO_TAGS) \
+		-cache $(gomobile_cache_abs)/android_bertybridge \
+		-target $(GOMOBILE_ANDROID_TARGET) \
+		-androidapi $(minimum_android_ver) \
+		./go/framework/bertybridge
+	touch $(abspath $@)
+	cd .. && $(GO) mod tidy
+	chmod -R u+wx $(gomobile_cache_abs) 2>/dev/null || true
+
+.PHONY: clean
+clean:
+	rm -fr node_modules
+
+	if [ -d $(gomobile_cache) ]; then \
+		if find $(gomobile_cache) -type d ! -perm -0300 -print -quit | grep -q .; then \
+			chmod -R u+wx $(gomobile_cache); \
+		fi; \
+		rm -rf $(gomobile_cache); \
+	fi
+	rm -fr $(IOS_OUTPUT_BERTYBRIDGE_FRAMEWORK)
+	rm -fr $(IOS_OUTPUT_BERTYPUSH_FRAMEWORK)
+	rm -f $(ANDROID_OUTPUT_LIBS)
+	rm -fr ios/Frameworks
+	rm -fr android/libs
+
+	rm -fr example/android
+	rm -fr example/ios
+	rm -fr example/node_modules
+
+	rm -fr mobile/android
+	rm -fr mobile/ios
+	rm -fr mobile/node_modules
+
+.PHONY: help
+help:
+	@echo "Available make commands:"
+	@cat Makefile | grep '^[a-z]' | grep -v '=' | cut -d: -f1 | sort | sed 's/^/  /'

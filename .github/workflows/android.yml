@@ -1,0 +1,160 @@
+name: Android
+on:
+  workflow_call:
+    inputs:
+      app-json-artifact:
+        type: string
+        required: false
+        default: ''
+  pull_request:
+    paths:
+      - "go/**"
+      - "!go/**.md"
+      - "go.*"
+      - "**.go"
+      - "berty-bridge-expo/**"
+      - "!berty-bridge-expo/mobile/src/i18n/locale/*/*.json"
+      - ".github/workflows/android.yml"
+
+jobs:
+  build:
+    name: Build for Android
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Free disk space
+        if: inputs.app-json-artifact != ''
+        run: |
+          echo "Disk space before cleanup:"
+          df -h /
+          # Remove large preinstalled toolchains unused by the Android build.
+          # Keep /usr/local/lib/android (SDK/NDK) — the build needs it.
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /usr/share/swift
+          sudo docker image prune --all --force || true
+          echo "Disk space after cleanup:"
+          df -h /
+
+      - name: Download patched app.json
+        if: inputs.app-json-artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.app-json-artifact }}
+          path: berty-bridge-expo/mobile
+
+      - name: Setup asdf
+        uses: asdf-vm/actions/setup@9cd779f40fe38688dd19505ccbc4eaaf018b44e7
+        with:
+          asdf_version: 0.16.7
+
+      - name: Setup go
+        run: |
+          asdf plugin add golang
+          asdf install golang
+          echo "GO_VERSION=$(asdf current golang | xargs | cut -d ' ' -f 6)" >> $GITHUB_ENV
+
+      - name: Setup node
+        working-directory: berty-bridge-expo
+        run: |
+          asdf plugin add nodejs
+          asdf install nodejs
+          echo "NODE_VERSION=$(asdf current nodejs | xargs | cut -d ' ' -f 6)" >> $GITHUB_ENV
+
+      - name: Set nodejs as global exec
+        run: |
+          asdf set -u nodejs ${{ env.NODE_VERSION }}
+
+      - name: Setup yarn
+        working-directory: berty-bridge-expo
+        run: |
+          asdf plugin add yarn
+          asdf install yarn
+
+      - name: Setup java
+        working-directory: berty-bridge-expo
+        run: |
+          asdf plugin add java
+          asdf install java
+
+      - name: Cache go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ hashFiles('go.sum') }}
+          restore-keys: ${{ runner.os }}-go-${{ env.GO_VERSION }}-
+
+      - name: Cache expo module node modules
+        uses: actions/cache@v4
+        with:
+          path: berty-bridge-expo/node_modules
+          key: ${{ runner.OS }}-node-${{ env.NODE_VERSION }}-berty-bridge-expo-${{ hashFiles('berty-bridge-expo/package-lock.json') }}
+          restore-keys: ${{ runner.OS }}-node-${{ env.NODE_VERSION }}-berty-bridge-expo-
+
+      - name: Cache app node modules
+        uses: actions/cache@v4
+        with:
+          path: berty-bridge-expo/mobile/node_modules
+          key: ${{ runner.OS }}-node-${{ env.NODE_VERSION }}-mobile-${{ hashFiles('berty-bridge-expo/mobile/package-lock.json') }}
+          restore-keys: ${{ runner.OS }}-node-${{ env.NODE_VERSION }}-mobile-
+
+      - name: Cache gobridge aar
+        id: cache-gobridge-aar
+        uses: n0izn0iz/mkache@5cedaeaf0b39a9220ae5a815cac8d2a924cee3ef
+        if: github.event_name == 'pull_request'
+        with:
+          rule: android/libs/gobridge.aar
+          makefile: berty-bridge-expo/Makefile
+          key: android-gomobile-bridge-${{ env.GO_VERSION }}
+
+      - name: Fetch expo module node modules
+        working-directory: berty-bridge-expo
+        run: make node_modules
+
+      - name: Fetch app node modules
+        working-directory: berty-bridge-expo/mobile
+        run: npm install
+
+      - name: Setup Expo and EAS
+        uses: expo/expo-github-action@v8
+        if: inputs.app-json-artifact != ''
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+          packager: npm
+
+      - name: Build the AAB
+        if: inputs.app-json-artifact != ''
+        working-directory: berty-bridge-expo/mobile
+        env:
+          APP_ENV: production
+        run: eas build -p android --profile production --non-interactive --local --output=${{ github.workspace }}/app-release.aab
+
+      - name: Submit the AAB
+        if: inputs.app-json-artifact != ''
+        working-directory: berty-bridge-expo/mobile
+        run: eas submit -p android --profile production --non-interactive --path=${{ github.workspace }}/app-release.aab
+
+      - name: Prebuild Android (PR)
+        if: github.event_name == 'pull_request'
+        working-directory: berty-bridge-expo/mobile
+        run: npx expo prebuild --platform android --no-install
+
+      - name: Android compile check (PR)
+        if: github.event_name == 'pull_request'
+        working-directory: berty-bridge-expo/mobile/android
+        env:
+          NODE_ENV: production
+          ORG_GRADLE_PROJECT_reactNativeArchitectures: arm64-v8a
+          GRADLE_OPTS: -Xmx3g -Dfile.encoding=UTF-8
+          SKIP_GOMOBILE: ${{ steps.cache-gobridge-aar.outputs.cache-hit == 'true' }}
+        run: |
+          ./gradlew \
+            :app:compileDebugKotlin \
+            :app:compileDebugJavaWithJavac \
+            :app:processDebugResources \
+            --no-daemon --max-workers=2 \
+            -PskipGomobile=${SKIP_GOMOBILE}

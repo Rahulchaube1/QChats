@@ -1,0 +1,40 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Collapse vendored files on GitHub
+vendor/* linguist-vendored
+*/vendor/* linguist-vendored
+client/common/openssl/built/* linguist-vendored
+
+# Collapse generated files on GitHub
+gen.sum linguist-generated merge=ours -diff
+*.gen.go linguist-generated merge=ours -diff
+*.gen.graphql linguist-generated merge=ours -diff
+*.gen.js linguist-generated merge=ours -diff
+*.gen.json linguist-generated merge=ours -diff
+*.gen.ts linguist-generated merge=ours -diff
+*.gen.tsx linguist-generated merge=ours -diff
+*.gen.yml linguist-generated merge=ours -diff
+*.pb.d.ts linguist-generated merge=ours -diff
+*.pb.go linguist-generated merge=ours -diff
+*.pb.gw.go linguist-generated merge=ours -diff
+*.pb.js linguist-generated merge=ours -diff
+*pb_test.go linguist-generated merge=ours -diff
+docs/apis/*types.md linguist-generated merge=ours -diff
+*.swagger.json linguist-generated merge=ours -diff
+api/*.yaml linguist-generated merge=ours -diff
+/js/packages/store/protocol/grpc-web-gen/** linguist-generated merge=ours -diff
+go.sum linguist-generated text
+yarn.lock linguist-generated text -diff
+Podfile.lock linguist-generated text -diff
+package.json linguist-generated
+go.mod text
+
+# Collapse snapshot files on GitHub
+*.snap linguist-generated
+
+# Reduce conflicts on markdown files
+*.md merge=union
+
+# specific for windows script files
+*.bat text eol=crlf

@@ -1,0 +1,279 @@
+import { grpc } from '@improbable-eng/grpc-web'
+import base64 from 'base64-js'
+import { Platform } from 'react-native'
+
+import beapi from '@berty/api'
+import { navigationRef } from '@berty/navigation/rootRef'
+import { GRPCError, createServiceClient } from '@berty/grpc-bridge'
+import { logger } from '@berty/grpc-bridge/middleware'
+import { bridge as rpcBridge, grpcweb as rpcWeb } from '@berty/grpc-bridge/rpc'
+import { rpcMock } from '@berty/grpc-bridge/rpc/rpc.mocked'
+import {
+	WelshMessengerServiceClient,
+	WelshProtocolServiceClient,
+} from '@berty/grpc-bridge/welsh-clients.gen'
+import { MessengerServiceMock } from '@berty/mock-services/static/messengerServiceMock'
+import { ProtocolServiceMock } from '@berty/mock-services/static/protocolServiceMock'
+import { GoBridge } from 'berty-bridge-expo'
+import { streamEventToAction as streamEventToReduxAction } from '@berty/redux/messengerActions'
+import { setClients, setStreamError, setClearClients } from '@berty/redux/reducers/ui.reducer'
+import { AppDispatch } from '@berty/redux/store'
+import { AsyncStorageKeys, NodeInfos, getData } from '@berty/utils/async-storage/async-storage'
+import { defaultGlobalPersistentOptions } from '@berty/utils/global-persistent-options/defaults'
+import { GlobalPersistentOptionsKeys } from '@berty/utils/global-persistent-options/types'
+import * as Notifications from 'expo-notifications';
+
+import { accountClient, storageGet } from '../accounts/accountClient'
+import { convertMAddr } from '../ipfs/convertMAddr'
+
+// Conversation public key from a Notified payload (itself a serialized sub-message).
+const conversationPkFromNotified = (payload: any): string | undefined => {
+	try {
+		const typeName: string | undefined =
+			typeof payload?.type === 'string'
+				? payload.type
+				: beapi.messenger.StreamEvent.Notified.Type[payload?.type]
+		if (!typeName || !payload?.payload) {
+			return undefined
+		}
+		const sub = (beapi.messenger.StreamEvent.Notified as any)[typeName.substring('Type'.length)]
+		if (!sub?.decode) {
+			return undefined
+		}
+		const bytes =
+			typeof payload.payload === 'string' ? base64.toByteArray(payload.payload) : payload.payload
+		const decoded = sub.decode(bytes)
+		return (
+			decoded?.interaction?.conversationPublicKey || decoded?.conversation?.publicKey || undefined
+		)
+	} catch (e) {
+		return undefined
+	}
+}
+
+// True when the user is currently viewing the given conversation.
+const isViewingConversation = (convPK: string | undefined): boolean => {
+	if (!convPK) {
+		return false
+	}
+	const route = navigationRef.current?.getCurrentRoute()
+	return (
+		(route?.name === 'Chat.OneToOne' || route?.name === 'Chat.MultiMember') &&
+		(route?.params as { convId?: string } | undefined)?.convId === convPK
+	)
+}
+
+const messengerEventStream = (
+	messengerClient: WelshMessengerServiceClient,
+	dispatch: AppDispatch,
+) =>
+	new Promise<void>(async (resolve, reject) => {
+		let cancel: () => Promise<void>
+		messengerClient
+			.eventStream({ shallowAmount: 20 })
+			.then(async stream => {
+				cancel = async () => await stream.stop()
+				stream.onMessage((msg, err) => {
+					try {
+						if (err) {
+							if (
+								err?.EOF ||
+								(err instanceof GRPCError &&
+									(err?.grpcErrorCode() === beapi.bridge.GRPCErrCode.CANCELED ||
+										err?.grpcErrorCode() === beapi.bridge.GRPCErrCode.UNAVAILABLE))
+							) {
+								// do nothing
+							} else {
+								console.warn('events stream onMessage error:', err)
+								dispatch(setStreamError({ error: err }))
+								reject(err)
+							}
+						}
+
+						const evt = msg?.event
+						if (!evt || evt.type === null || evt.type === undefined) {
+							console.warn('received empty or undefined event')
+							return
+						}
+
+						const action = streamEventToReduxAction(evt)
+						if (action?.type === 'messenger/Notified') {
+							// const typeName = action?.payload?.type || beapi.messenger.StreamEvent.Notified.Type.Unknown
+							//
+							// const payloadName = typeName.substring('Type'.length)
+							// const pbobj = (beapi.messenger.StreamEvent.Notified as any)[payloadName]
+							// if (!pbobj) {
+							// 	console.warn('failed to find a protobuf object matching the notification type')
+							// 	return
+							// }
+							// if (typeof action.payload.payload === 'string') {
+							// 	action.payload.payload = deserializeFromBase64(action.payload.payload)
+							// }
+							// action.payload.payload =
+							// 	action.payload.payload === undefined ? {} : pbobj.decode(action.payload.payload)
+							// Don't notify for the conversation the user is currently viewing.
+							const notifiedConvPK = conversationPkFromNotified(action.payload)
+							if (!isViewingConversation(notifiedConvPK)) {
+								Notifications.scheduleNotificationAsync({
+									content: {
+										title: action.payload.title,
+										body: action.payload.body,
+										data: {
+											type: action.payload.type,
+											payload: action.payload.payload,
+											convPK: notifiedConvPK,
+										},
+									},
+									trigger: null,
+								});
+							}
+						}
+						if (action) {
+							// this event is the last message that say that all events are done for opening an account
+							if (action.type === 'messenger/ListEnded') {
+								resolve()
+							}
+							dispatch(action)
+						}
+					} catch (err) {
+						console.warn('failed to handle stream event (', msg?.event, '):', err)
+					}
+				})
+				await stream.start()
+			})
+			.catch(err => {
+				if (err instanceof GRPCError && err?.EOF) {
+					console.info('end of the events stream')
+					resolve()
+				} else {
+					console.warn('events stream error:', err)
+					dispatch(setStreamError({ error: err }))
+					reject(err)
+				}
+			})
+		dispatch(setClearClients(async () => await cancel()))
+	})
+
+const createMockClients = () => {
+	return {
+		protocolClient: createServiceClient(
+			beapi.protocol.ProtocolService,
+			rpcMock(new ProtocolServiceMock()),
+			logger.create('PROTOCOL'),
+		),
+		messengerClient: createServiceClient(
+			beapi.messenger.MessengerService,
+			rpcMock(new MessengerServiceMock()),
+			logger.create('MESSENGER'),
+		),
+	}
+}
+
+const connectService = async (serviceName: string, address: string) => {
+	try {
+		console.log('connect service')
+		await GoBridge.connectService(serviceName, address)
+		console.log('connect service done')
+	} catch (err: any) {
+		if (err?.message?.indexOf('already started') === -1) {
+			console.error('unable to init bridge: ', err)
+		} else {
+			console.log('bridge already started: ', err)
+		}
+	}
+}
+
+const createServicesClients = async (forceMock: boolean) => {
+	if (forceMock) {
+		return createMockClients()
+	}
+
+	if (Platform.OS === 'web') {
+		const openedAccount = await accountClient?.getOpenedAccount({})
+		const url = convertMAddr(openedAccount?.listeners || [])
+
+		if (url === null) {
+			throw new Error('unable to find service address')
+		}
+
+		if (url === 'mock://') {
+			return createMockClients()
+		}
+
+		const opts = {
+			transport: grpc.CrossBrowserHttpTransport({ withCredentials: false }),
+			host: url,
+		}
+
+		return {
+			protocolClient: createServiceClient(
+				beapi.protocol.ProtocolService,
+				rpcWeb(opts),
+				logger.create('PROTOCOL'),
+			),
+			messengerClient: createServiceClient(
+				beapi.messenger.MessengerService,
+				rpcWeb(opts),
+				logger.create('MESSENGER'),
+			),
+		}
+	}
+
+	const selectNode: NodeInfos | null = await getData(AsyncStorageKeys.SelectNode)
+
+	if (selectNode !== null && selectNode.external) {
+		const concatAddr = (address: string, port: string): string => {
+			return address + ':' + port
+		}
+
+		connectService(
+			'berty.protocol.v1.ProtocolService',
+			concatAddr(selectNode.address, selectNode.messengerPort),
+		)
+		connectService(
+			'berty.messenger.v1.MessengerService',
+			concatAddr(selectNode.address, selectNode.messengerPort),
+		)
+	}
+
+	return {
+		messengerClient: createServiceClient(
+			beapi.messenger.MessengerService,
+			rpcBridge,
+			logger.create('MESSENGER'),
+		),
+		protocolClient: createServiceClient(
+			beapi.protocol.ProtocolService,
+			rpcBridge,
+			logger.create('PROTOCOL'),
+		),
+	}
+}
+
+export const openClients = async (
+	dispatch: AppDispatch,
+	forceMock = false,
+): Promise<{
+	messengerClient: WelshMessengerServiceClient
+	protocolClient: WelshProtocolServiceClient
+}> => {
+	let finalForceMock = forceMock
+	try {
+		finalForceMock =
+			forceMock ||
+			JSON.parse(await storageGet(GlobalPersistentOptionsKeys.ForceMock)) ||
+			defaultGlobalPersistentOptions().forceMock
+	} catch (e) {
+		console.warn('Failed to get forceMock value:', e)
+	}
+
+	const { messengerClient, protocolClient } = await createServicesClients(finalForceMock)
+
+	// call messenger client event stream
+	console.log('starting event stream')
+	await messengerEventStream(messengerClient, dispatch)
+
+	dispatch(setClients({ messengerClient, protocolClient }))
+
+	return { messengerClient, protocolClient }
+}

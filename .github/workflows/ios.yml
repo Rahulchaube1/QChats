@@ -1,0 +1,170 @@
+name: iOS
+on:
+  workflow_call:
+    inputs:
+      app-json-artifact:
+        type: string
+        required: false
+        default: ''
+  pull_request:
+    paths:
+      - "go/**"
+      - "!go/**.md"
+      - "go.*"
+      - "**.go"
+      - "berty-bridge-expo/**"
+      - "!berty-bridge-expo/mobile/src/i18n/locale/*/*.json"
+      - ".github/workflows/ios.yml"
+
+jobs:
+  build:
+    name: Build for iOS
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download patched app.json
+        if: inputs.app-json-artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.app-json-artifact }}
+          path: berty-bridge-expo/mobile
+
+      - name: Select Xcode 26
+        run: sudo xcode-select -s /Applications/Xcode_26.3.0.app
+
+      - name: Setup asdf
+        uses: asdf-vm/actions/setup@9cd779f40fe38688dd19505ccbc4eaaf018b44e7
+        with:
+          asdf_version: 0.16.7
+
+      - name: Setup go
+        run: |
+          asdf plugin add golang
+          asdf install golang
+          echo "GO_VERSION=$(asdf current golang | xargs | cut -d ' ' -f 6)" >> $GITHUB_ENV
+
+      - name: Setup node
+        working-directory: berty-bridge-expo
+        run: |
+          asdf plugin add nodejs
+          asdf install nodejs
+          echo "NODE_VERSION=$(asdf current nodejs | xargs | cut -d ' ' -f 6)" >> $GITHUB_ENV
+
+      - name: Set nodejs as global exec
+        run: |
+          asdf set -u nodejs ${{ env.NODE_VERSION }}
+
+      - name: Setup yarn
+        working-directory: berty-bridge-expo
+        run: |
+          asdf plugin add yarn
+          asdf install yarn
+
+      - name: Cache go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ hashFiles('go/**/go.sum') }}
+          restore-keys: ${{ runner.os }}-go-${{ env.GO_VERSION }}-
+
+      - name: Cache expo module node modules
+        uses: actions/cache@v4
+        with:
+          path: berty-bridge-expo/node_modules
+          key: ${{ runner.OS }}-node-${{ env.NODE_VERSION }}-berty-bridge-expo-${{ hashFiles('berty-bridge-expo/package-lock.json') }}
+          restore-keys: ${{ runner.OS }}-node-${{ env.NODE_VERSION }}-berty-bridge-expo-
+
+      - name: Cache app node modules
+        uses: actions/cache@v4
+        with:
+          path: berty-bridge-expo/mobile/node_modules
+          key: ${{ runner.OS }}-node-${{ env.NODE_VERSION }}-mobile-${{ hashFiles('berty-bridge-expo/mobile/package-lock.json') }}
+          restore-keys: ${{ runner.OS }}-node-${{ env.NODE_VERSION }}-mobile-
+
+      - name: Cache bertybridge framework
+        id: cache-bertybridge-framework
+        uses: n0izn0iz/mkache@5cedaeaf0b39a9220ae5a815cac8d2a924cee3ef
+        if: github.event_name == 'pull_request'
+        env:
+          GOMOBILE_IOS_TARGET: iossimulator
+        with:
+          rule: ios/Frameworks/Bertybridge.xcframework
+          makefile: berty-bridge-expo/Makefile
+          key: ios-gomobile-bridge-${{ env.GO_VERSION }}
+
+      - name: Cache bertypush framework
+        id: cache-bertypush-framework
+        uses: n0izn0iz/mkache@5cedaeaf0b39a9220ae5a815cac8d2a924cee3ef
+        if: github.event_name == 'pull_request'
+        env:
+          GOMOBILE_IOS_TARGET: iossimulator
+        with:
+          rule: plugin/src/NotificationService/Bertypush.xcframework
+          makefile: berty-bridge-expo/Makefile
+          key: ios-gomobile-push-${{ env.GO_VERSION }}
+
+      - name: Fetch expo module node modules
+        working-directory: berty-bridge-expo
+        run: make node_modules
+
+      - name: Fetch app node modules
+        working-directory: berty-bridge-expo/mobile
+        run: npm install
+
+      - name: Setup Expo and EAS
+        uses: expo/expo-github-action@v8
+        if: inputs.app-json-artifact != ''
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+          packager: npm
+
+      - name: Build the IPA
+        if: inputs.app-json-artifact != ''
+        working-directory: berty-bridge-expo/mobile
+        env:
+          APP_ENV: production
+        run: eas build -p ios --profile production --non-interactive --local --output=${{ github.workspace }}/berty-ios.ipa
+
+      - name: Submit the IPA
+        if: inputs.app-json-artifact != ''
+        working-directory: berty-bridge-expo/mobile
+        run: eas submit -p ios --profile production --non-interactive --path=${{ github.workspace }}/berty-ios.ipa
+
+      - name: Prebuild iOS (PR)
+        if: github.event_name == 'pull_request'
+        working-directory: berty-bridge-expo/mobile
+        env:
+          GOMOBILE_IOS_TARGET: iossimulator
+        run: npx expo prebuild --platform ios --clean
+
+      - name: iOS compile check (PR)
+        if: github.event_name == 'pull_request'
+        working-directory: berty-bridge-expo/mobile/ios
+        env:
+          NODE_ENV: production
+        run: |
+          WORKSPACE=$(find . -maxdepth 1 -name '*.xcworkspace' | head -n 1)
+          if [ -z "$WORKSPACE" ]; then
+            echo "No Xcode workspace found"
+            exit 1
+          fi
+
+          SCHEME=$(xcodebuild -list -workspace "$WORKSPACE" | awk '/Schemes:/{flag=1;next} flag && NF{print; exit}' | xargs)
+          if [ -z "$SCHEME" ]; then
+            echo "No Xcode scheme found"
+            exit 1
+          fi
+
+          xcodebuild \
+            -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            build

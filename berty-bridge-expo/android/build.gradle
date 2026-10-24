@@ -1,0 +1,84 @@
+apply plugin: 'com.android.library'
+
+group = 'tech.berty.bertybridgeexpo'
+version = '0.1.0'
+def goBridgeAar = file('libs/gobridge.aar')
+
+def forceGomobile = project.hasProperty('forceGomobile') && project.property('forceGomobile').toString().toBoolean()
+def skipGomobile = project.hasProperty('skipGomobile') && project.property('skipGomobile').toString().toBoolean()
+
+if (skipGomobile) {
+    logger.lifecycle("bertybridgeexpo: skipping Go bridge build (-PskipGomobile=true)")
+} else {
+    logger.lifecycle("bertybridgeexpo: building Go bridge (make android.gomobile), this can take several minutes on first build...")
+    exec {
+        workingDir '..'
+        if (forceGomobile) {
+            commandLine 'make', '-B', 'android.gomobile'
+        } else {
+            commandLine 'make', 'android.gomobile'
+        }
+    }
+}
+
+// Fail fast with a clear message instead of silently shipping an APK that is
+// missing the bertybridge classes.
+if (!skipGomobile && !goBridgeAar.exists()) {
+    throw new GradleException("bertybridgeexpo: ${goBridgeAar} was not produced by 'make android.gomobile'. " +
+        "Run it manually from berty-bridge-expo/ and retry, or pass -PskipGomobile=true if you provide the aar another way.")
+}
+
+def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
+apply from: expoModulesCorePlugin
+applyKotlinExpoModulesCorePlugin()
+useCoreDependencies()
+useExpoPublishing()
+
+// If you want to use the managed Android SDK versions from expo-modules-core, set this to true.
+// The Android SDK versions will be bumped from time to time in SDK releases and may introduce breaking changes in your module code.
+// Most of the time, you may like to manage the Android SDK versions yourself.
+def useManagedAndroidSdkVersions = false
+if (useManagedAndroidSdkVersions) {
+  useDefaultAndroidSdkVersions()
+} else {
+  buildscript {
+    // Simple helper that allows the root project to override versions declared by this library.
+    ext.safeExtGet = { prop, fallback ->
+      rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+    }
+  }
+  project.android {
+    compileSdkVersion safeExtGet("compileSdkVersion", 34)
+    defaultConfig {
+      minSdkVersion safeExtGet("minSdkVersion", 21)
+      targetSdkVersion safeExtGet("targetSdkVersion", 34)
+    }
+  }
+}
+
+android {
+  namespace "tech.berty.bertybridgeexpo"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+  lintOptions {
+    abortOnError false
+  }
+}
+
+dependencies {
+    implementation fileTree(dir: "libs", include: ['*.aar', '*.jar'])
+
+    // Add keystore, 1.1 is required to use the MasterKey class
+    implementation "androidx.security:security-crypto:1.1.0-alpha06"
+    implementation "com.google.android.gms:play-services-tasks:18.2.0"
+
+    // Import the Firebase BoM
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation 'com.google.firebase:firebase-messaging'
+
+    // Add Android Nearby
+    implementation "com.google.android.gms:play-services-nearby:16.0.0"
+    implementation 'com.google.android.gms:play-services-location:17.0.0'
+}

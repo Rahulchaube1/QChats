@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 540 200" width="540" height="200" fill="none">
+  <defs>
+    <!-- Violet gradient: light purple at top-right to deeper blue-violet at bottom-left -->
+    <linearGradient id="qchatGradient" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#9d4edd" />
+      <stop offset="45%" stop-color="#7928ca" />
+      <stop offset="100%" stop-color="#4338ca" />
+    </linearGradient>
+  </defs>
+
+  <!-- Background: Pure White -->
+  <rect width="100%" height="100%" fill="#FFFFFF" />
+
+  <!-- Centered Logo Group -->
+  <g transform="translate(68, 48)">
+    <!-- Q-Chat Icon -->
+    <g transform="translate(0, 4)">
+      <!-- Outer chat bubble with downward-left tail resembling stylized Q / chat bubble -->
+      <path d="M 52,0 C 80.7,0 104,23.3 104,52 C 104,80.7 80.7,104 52,104 C 43.6,104 35.7,102.0 28.7,98.5 L 8.4,107.2 C 5.5,108.4 2.3,106.3 2.7,103.2 L 5.8,82.6 C 2.1,73.8 0,63.2 0,52 C 0,23.3 23.3,0 52,0 Z" 
+            fill="url(#qchatGradient)" />
+      
+      <!-- Inner cutout: white interior creating the thick rounded stroke -->
+      <path d="M 52,20 C 69.7,20 84,34.3 84,52 C 84,69.7 69.7,84 52,84 C 34.3,84 20,69.7 20,52 C 20,34.3 34.3,20 52,20 Z" 
+            fill="#FFFFFF" />
+    </g>
+
+    <!-- Wordmark: QChats -->
+    <!-- Font-family stack prioritizing clean modern geometric sans: Inter, Geist, Helvetica Neue, system-ui -->
+    <text x="132" y="80" 
+          font-family="system-ui, -apple-system, 'Inter', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" 
+          font-size="76" 
+          font-weight="800" 
+          letter-spacing="-1.5px" 
+          fill="#111111">QChats</text>
+  </g>
+</svg>
